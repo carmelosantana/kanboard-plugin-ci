@@ -1,0 +1,64 @@
+# Reusable: build and publish a suite plugin's release zip for the pushed vX.Y.Z tag.
+#
+# Called from a plugin repo's release.yml after plugin-test.yml passes
+# (see templates/workflows/release.yml). Fails when the tag differs from plugin.json's
+# version, or from a version literal still hard-coded in Plugin.php's getPluginVersion().
+name: plugin-release
+
+on:
+  workflow_call:
+    inputs:
+      ship-docs:
+        description: Keep docs/ in the zip (default leaves it out).
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    # contents: write lets `gh release create` publish the zip; nothing else is granted.
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build and publish plugin zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHIP_DOCS: ${{ inputs.ship-docs }}
+        run: |
+          NAME=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+          VERSION=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::releases come from a pushed vX.Y.Z tag, not $GITHUB_REF_TYPE $GITHUB_REF_NAME"; exit 1
+          fi
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match plugin.json v$VERSION"; exit 1
+          fi
+          PHP_VERSION=$(grep -A3 'function getPluginVersion' Plugin.php | grep -oE "'[0-9]+\.[0-9]+\.[0-9]+[^']*'" | head -1 | tr -d "'" || true)
+          if [ -n "$PHP_VERSION" ] && [ "$PHP_VERSION" != "$VERSION" ]; then
+            echo "::error::Plugin.php getPluginVersion() says $PHP_VERSION, plugin.json says $VERSION"; exit 1
+          fi
+          # zip follows symlinks, so one would put whatever it points at into the release.
+          LINKS=$(find . -path ./.git -prune -o -type l -print)
+          if [ -n "$LINKS" ]; then echo "::error::symlinks would be followed into the zip: $LINKS"; exit 1; fi
+          EXCLUDES=(.git .github Test testing tools prototype research_notes local .claude .superpowers .DS_Store .gitignore)
+          [ "$SHIP_DOCS" = "true" ] || EXCLUDES+=(docs)
+          mkdir -p /tmp/stage/"$NAME"
+          rsync -a "${EXCLUDES[@]/#/--exclude=}" ./ /tmp/stage/"$NAME"/
+          ( cd /tmp/stage && zip -qr "$GITHUB_WORKSPACE/${NAME}-${VERSION}.zip" "$NAME" )
+          SIZE=$(stat -c%s "${NAME}-${VERSION}.zip")
+          [ "$SIZE" -le 8388608 ] || { echo "::error::zip ${SIZE}B > 8MB"; exit 1; }
+          # The tag must still point at the commit this zip was built from (a deleted or moved tag fails here).
+          read -r TYPE OBJ < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
+          [ "$TYPE" = tag ] && OBJ=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$OBJ" --jq .object.sha)
+          if [ "$OBJ" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $GITHUB_REF_NAME points at $OBJ, but this zip was built from $GITHUB_SHA"; exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${NAME}-${VERSION}.zip" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes "Release $GITHUB_REF_NAME"

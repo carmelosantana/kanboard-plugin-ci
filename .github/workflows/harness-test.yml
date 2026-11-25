@@ -1,0 +1,64 @@
+# Tests this repo's own scripts: the plugin test runner (against fixture plugins and a
+# real Kanboard checkout), the access-map guard, ci-requires, package.sh and sync-workflows.sh.
+name: harness-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Check out Kanboard
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: kanboard/kanboard
+          ref: v1.2.47
+          path: testing/kanboard-src
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, gd, mbstring, zip, intl
+          coverage: none
+          tools: composer
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Install Kanboard dev dependencies
+        run: composer install -d testing/kanboard-src --no-interaction --no-progress --prefer-dist
+
+      - name: run-plugin-tests.test.sh
+        run: testing/run-plugin-tests.test.sh
+
+      - name: access-map-guard.test.ts
+        run: node --test testing/access-map-guard.test.ts
+
+      - name: ci-requires.test.sh
+        run: testing/ci-requires.test.sh
+
+      - name: package.test.sh
+        run: scripts/package.test.sh
+
+      - name: sync-workflows.test.sh
+        run: scripts/sync-workflows.test.sh

@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# run-plugin-tests.sh — Run plugin PHPUnit suites against Kanboard v1.2.47 core.
+#
+# Usage (from repo root):
+#   ./testing/run-plugin-tests.sh <PluginName>   # one suite, PHPUnit output as-is
+#   ./testing/run-plugin-tests.sh <path>         # one suite from another checkout of a
+#                                                # plugin (a git worktree, a scratch clone)
+#   ./testing/run-plugin-tests.sh --all          # every suite to completion, then a
+#                                                # pass/fail table; exit 1 if any failed
+#   ./testing/run-plugin-tests.sh --list         # print the discovered plugin names
+#
+# A plugin is any directory under PLUGINS_ROOT that holds a plugin.json — there is no
+# hand-kept list. Each run links them into a temp plugins dir (Kanboard reads PLUGINS_DIR
+# from the environment) and the generated PHPUnit bootstrap registers their namespaces.
+#
+# Every suite runs to completion. Kanboard's own units.sqlite.xml sets stopOnFailure, which
+# cut runs short and hid the real test count, so this script runs PHPUnit with a copy of
+# that config without the stopOn* attributes (a copy in the run's temp directory).
+#
+# Run from a linked worktree of this harness, the defaults below point at the main
+# checkout's plugins and kanboard-src, so a worktree needs no setup of its own.
+#
+# Environment overrides (CI uses these; locally the defaults are right):
+#   PLUGINS_ROOT  where plugin checkouts live   (default: the harness root if it holds plugins,
+#                                               else the harness's parent directory)
+#   KB_SRC        the Kanboard source checkout  (default: testing/kanboard-src in the harness,
+#                                               else in PLUGINS_ROOT)
+#   LOG_DIR       --all writes one log per suite here (default: $KB_SRC/test-logs)
+#   DB_DRIVER     sqlite (default), mysql or postgres: the Kanboard units config to use
+#
+# One-time local setup:
+#   git clone --depth 1 --branch v1.2.47 https://github.com/kanboard/kanboard.git testing/kanboard-src
+#   composer install -d testing/kanboard-src
+
+set -euo pipefail
+
+HARNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# In a linked worktree of the harness, fall back to the main checkout for anything the
+# worktree lacks (plugin checkouts and kanboard-src are gitignored, so it has neither).
+MAIN_ROOT="$HARNESS_ROOT"
+common_dir="$(git -C "$HARNESS_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[[ -n "$common_dir" ]] && MAIN_ROOT="$(dirname "$common_dir")"
+
+# Plugins: beside the harness's own files, else the main checkout's, else in the workspace the
+# harness (or its main checkout) is cloned into as ./harness.
+default_plugins_root="$(dirname "$HARNESS_ROOT")"
+for dir in "$HARNESS_ROOT" "$MAIN_ROOT" "$(dirname "$HARNESS_ROOT")" "$(dirname "$MAIN_ROOT")"; do
+  if compgen -G "${dir}/*/plugin.json" > /dev/null; then default_plugins_root="$dir"; break; fi
+done
+PLUGINS_ROOT="$(cd "${PLUGINS_ROOT:-$default_plugins_root}" && pwd)"
+
+# Kanboard source: the harness's, else the main checkout's, else the workspace's the harness
+# (or its main checkout) is cloned into, else the plugins root's.
+default_kb_src="${PLUGINS_ROOT}/testing/kanboard-src"
+for dir in "$HARNESS_ROOT" "$MAIN_ROOT" "$(dirname "$HARNESS_ROOT")" "$(dirname "$MAIN_ROOT")"; do
+  if [[ -d "${dir}/testing/kanboard-src/vendor" ]]; then default_kb_src="${dir}/testing/kanboard-src"; break; fi
+done
+KB_SRC="${KB_SRC:-$default_kb_src}"
+BOOTSTRAP="${KB_SRC}/tests/plugin-bootstrap.php"
+PHPUNIT="${KB_SRC}/vendor/bin/phpunit"
+# DB_DRIVER picks Kanboard's units.<driver>.xml (sqlite, mysql or postgres); Kanboard reads DB_HOSTNAME, DB_USERNAME
+# and DB_PASSWORD from the environment too. testing/run-realdb-tests.sh runs a suite on MariaDB or Postgres this way.
+CORE_CONFIG="${KB_SRC}/tests/units.${DB_DRIVER:-sqlite}.xml"
+LOG_DIR="${LOG_DIR:-${KB_SRC}/test-logs}"
+
+discover_plugins() {
+  local f
+  for f in "${PLUGINS_ROOT}"/*/plugin.json; do
+    [[ -f "$f" ]] || continue
+    basename "$(dirname "$f")"
+  done
+}
+
+mapfile -t PLUGINS < <(discover_plugins)
+
+usage() {
+  echo "Usage: $0 <PluginName> | --all | --list"
+  echo "Plugins found under ${PLUGINS_ROOT}: ${PLUGINS[*]:-none}"
+}
+
+ARG="${1:-}"
+case "$ARG" in
+  "" | -h | --help) usage; [[ -z "$ARG" ]] && exit 1; exit 0 ;;
+  --list) printf '%s\n' "${PLUGINS[@]}"; exit 0 ;;
+esac
+
+# ── Check kanboard-src is present ─────────────────────────────────────────────
+if [[ ! -f "$PHPUNIT" ]]; then
+  echo "ERROR: ${PHPUNIT} not found."
+  echo "Run once:"
+  echo "  git clone --depth 1 --branch v1.2.47 https://github.com/kanboard/kanboard.git ${KB_SRC}"
+  echo "  composer install -d ${KB_SRC}"
+  exit 1
+fi
+
+# ── Write bootstrap (registers all plugin PSR-4 namespaces) ──────────────────
+# This file lives inside kanboard-src/ (gitignored) and is regenerated each run.
+cat > "${BOOTSTRAP}" << 'BOOTSTRAP_EOF'
+<?php
+/**
+ * PHPUnit bootstrap for plugin unit tests.
+ * Registers all plugin namespaces with Composer's autoloader so plugin classes
+ * are found without any manual require_once in individual test files.
+ *
+ * Auto-generated by testing/run-plugin-tests.sh — do not edit by hand.
+ */
+$loader = require __DIR__ . '/../vendor/autoload.php';
+$pluginsDir = getenv('PLUGINS_DIR') ?: __DIR__ . '/../plugins';
+if (is_dir($pluginsDir)) {
+    foreach (new DirectoryIterator($pluginsDir) as $entry) {
+        if ($entry->isDot() || !$entry->isDir()) {
+            continue;
+        }
+        $name = $entry->getFilename();
+        $loader->addPsr4("Kanboard\\Plugin\\{$name}\\", $entry->getPathname() . '/');
+    }
+}
+BOOTSTRAP_EOF
+
+# ── A plugins dir and PHPUnit config of our own for this run ──────────────────
+# Kanboard reads PLUGINS_DIR from the environment, so each run links every plugin under
+# PLUGINS_ROOT into a temp directory, and a path argument points its plugin's link at that
+# path. Classes and templates load from there.
+#
+# Kanboard's AssetHelper still stats assets at <kanboard-src>/plugins/<Name>/..., ignoring
+# PLUGINS_DIR, so missing links there are created too. Existing ones are never repointed:
+# other sessions share them. A path run whose plugin adds a new asset file therefore needs
+# that file in the checkout <kanboard-src>/plugins/<Name> points at.
+RUN_DIR="$(mktemp -d)"
+trap 'rm -rf "$RUN_DIR"' EXIT
+PLUGINS_DIR="${RUN_DIR}/plugins"
+mkdir "$PLUGINS_DIR"
+# Kanboard's config minus stopOnError/stopOnFailure, kept in the run's own directory: parallel
+# runs never share it, and run-realdb-tests.sh mounts <Kanboard>/tests read-only. Test paths
+# are passed on the command line, so the config's relative <directory> is never used.
+CONFIG="${RUN_DIR}/plugin-units.xml"
+sed -E 's/[[:space:]]+stopOn(Error|Failure)="[^"]*"//g' "$CORE_CONFIG" > "$CONFIG"
+for p in "${PLUGINS[@]}"; do ln -s "${PLUGINS_ROOT}/${p}" "${PLUGINS_DIR}/${p}"; done
+
+run_suite() {
+  ( cd "$KB_SRC" && PLUGINS_DIR="$PLUGINS_DIR" "$PHPUNIT" --bootstrap "$BOOTSTRAP" -c "$CONFIG" \
+      "$PLUGINS_DIR/$1/Test/" --no-coverage )
+}
+
+SRC=""
+if [[ "$ARG" == */* && -f "${ARG}/plugin.json" ]]; then
+  SRC="$(cd "$ARG" && pwd)"
+  ARG="$(sed -nE 's/^namespace Kanboard\\Plugin\\([A-Za-z0-9_]+);.*/\1/p' "$SRC/Plugin.php" 2>/dev/null | head -1)"
+  [[ -n "$ARG" ]] || { echo "ERROR: no 'namespace Kanboard\\Plugin\\X;' in ${SRC}/Plugin.php"; exit 1; }
+  ln -sfn "$SRC" "${PLUGINS_DIR}/${ARG}"
+fi
+
+mkdir -p "${KB_SRC}/plugins"
+for p in "${PLUGINS[@]}" ${SRC:+"$ARG"}; do
+  [[ -e "${KB_SRC}/plugins/${p}" || -L "${KB_SRC}/plugins/${p}" ]] && continue
+  ln -s "$(readlink "${PLUGINS_DIR}/${p}")" "${KB_SRC}/plugins/${p}"
+done
+
+# ── Single plugin ──────────────────────────────────────────────────────────────
+if [[ "$ARG" != "--all" ]]; then
+  if [[ ! -f "${PLUGINS_DIR}/${ARG}/plugin.json" ]]; then
+    echo "ERROR: no plugin.json under ${PLUGINS_ROOT}/${ARG}"
+    usage
+    exit 1
+  fi
+  if [[ ! -d "${PLUGINS_DIR}/${ARG}/Test" ]]; then
+    echo "No Test/ directory for plugin '${ARG}' — nothing to run."
+    exit 0
+  fi
+  echo "Running tests for plugin: ${ARG}"
+  [[ -n "$SRC" ]] && echo "  Source        : ${SRC}"
+  echo "  Kanboard root : ${KB_SRC}"
+  echo ""
+  run_suite "$ARG"
+  exit $?
+fi
+
+# ── --all: every suite to completion, then a table ────────────────────────────
+if [[ ${#PLUGINS[@]} -eq 0 ]]; then
+  echo "ERROR: no plugins (no */plugin.json) under ${PLUGINS_ROOT}; set PLUGINS_ROOT."
+  exit 1
+fi
+mkdir -p "$LOG_DIR"
+failed=0
+rows=()
+# Suite-wide check first: no two plugins (or a plugin and core) share a controller short name,
+# since Kanboard's AccessMap keys rules by that name alone. Needs Node 22.18+ (type stripping).
+guard_log="${LOG_DIR}/access-map-guard.log"
+printf 'Running %-20s ' "access-map-guard"
+if node "${HARNESS_ROOT}/testing/access-map-guard.ts" "$PLUGINS_ROOT" "$KB_SRC" > "$guard_log" 2>&1; then
+  status=PASS
+else
+  status=FAIL; failed=1
+fi
+echo "$status"
+rows+=("access-map-guard|${status}|$(tail -1 "$guard_log" | cut -c1-60)|-")
+for p in "${PLUGINS[@]}"; do
+  log="${LOG_DIR}/${p}.log"
+  if [[ ! -d "${PLUGINS_DIR}/${p}/Test" ]]; then
+    rows+=("${p}|SKIP|no Test/ dir|-")
+    continue
+  fi
+  printf 'Running %-20s ' "$p"
+  start=$SECONDS
+  if run_suite "$p" > "$log" 2>&1; then status=PASS; else status=FAIL; failed=1; fi
+  secs=$((SECONDS - start))
+  # PHPUnit's last summary line: "OK (12 tests, 34 assertions)" or
+  # "Tests: 12, Assertions: 34, Failures: 1." (possibly with warnings/notices).
+  summary="$(grep -E '^(OK|Tests:|No tests executed)' "$log" | tail -1 || true)"
+  [[ -n "$summary" ]] || summary="no PHPUnit summary — see ${log}"
+  echo "${status} (${secs}s)"
+  rows+=("${p}|${status}|${summary}|${secs}s")
+done
+
+echo ""
+printf '| %-20s | %-6s | %-60s | %6s |\n' Plugin Result Summary Time
+printf '|%s|%s|%s|%s|\n' "$(printf -- '-%.0s' {1..22})" "$(printf -- '-%.0s' {1..8})" \
+  "$(printf -- '-%.0s' {1..62})" "$(printf -- '-%.0s' {1..8})"
+for r in "${rows[@]}"; do
+  IFS='|' read -r name status summary secs <<< "$r"
+  printf '| %-20s | %-6s | %-60s | %6s |\n' "$name" "$status" "$summary" "$secs"
+done
+echo ""
+echo "Logs: ${LOG_DIR}"
+if [[ $failed -ne 0 ]]; then
+  echo "FAILED: at least one suite failed."
+  exit 1
+fi
+echo "All suites passed."
