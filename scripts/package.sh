@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # package.sh <PluginDir> <OutDir>
 # Build a Kanboard-plugin release zip whose single top-level folder is the
-# plugin name, excluding dev-only paths (Test/, .git/). Prints the artifact path.
+# plugin.json name, excluding dev-only paths (Test/, .git/). Prints the artifact path.
 set -euo pipefail
 
 SRC="${1:?usage: package.sh <PluginDir> <OutDir>}"
 OUT="${2:?usage: package.sh <PluginDir> <OutDir>}"
 
-NAME="$(basename "$SRC")"
-VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$SRC/plugin.json" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
-[ -n "$VERSION" ] || { echo "ERROR: could not read version from $SRC/plugin.json" >&2; exit 1; }
+# The name and version become paths, so plugin-meta.sh validates both (and exits non-zero on anything unsafe).
+META="$("$(dirname "$0")/plugin-meta.sh" "$SRC")"
+read -r NAME VERSION <<< "$META"
 
 # zip follows symlinks, so one would put whatever it points at into the release: refuse.
 LINKS="$(cd "$SRC" && find . -path ./.git -prune -o -type l -print)"

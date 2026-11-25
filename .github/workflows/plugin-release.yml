@@ -25,15 +25,27 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          path: self
+          persist-credentials: false
+
+      # plugin-meta.sh from this workflow's own commit validates the name and version before they become paths.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: harness
+          sparse-checkout: scripts/plugin-meta.sh
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Build and publish plugin zip
         env:
           GH_TOKEN: ${{ github.token }}
           SHIP_DOCS: ${{ inputs.ship-docs }}
+        working-directory: self
         run: |
-          NAME=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
-          VERSION=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+          META=$(bash "$GITHUB_WORKSPACE/harness/scripts/plugin-meta.sh" .)
+          read -r NAME VERSION <<< "$META"
           if [ "$GITHUB_REF_TYPE" != tag ]; then
             echo "::error::releases come from a pushed vX.Y.Z tag, not $GITHUB_REF_TYPE $GITHUB_REF_NAME"; exit 1
           fi
@@ -49,10 +61,12 @@ jobs:
           if [ -n "$LINKS" ]; then echo "::error::symlinks would be followed into the zip: $LINKS"; exit 1; fi
           EXCLUDES=(.git .github Test testing tools prototype research_notes local .claude .superpowers .DS_Store .gitignore)
           [ "$SHIP_DOCS" = "true" ] || EXCLUDES+=(docs)
-          mkdir -p /tmp/stage/"$NAME"
-          rsync -a "${EXCLUDES[@]/#/--exclude=}" ./ /tmp/stage/"$NAME"/
-          ( cd /tmp/stage && zip -qr "$GITHUB_WORKSPACE/${NAME}-${VERSION}.zip" "$NAME" )
-          SIZE=$(stat -c%s "${NAME}-${VERSION}.zip")
+          STAGE=$(mktemp -d)
+          ZIP="$GITHUB_WORKSPACE/${NAME}-${VERSION}.zip"
+          mkdir "$STAGE/$NAME"
+          rsync -a "${EXCLUDES[@]/#/--exclude=}" ./ "$STAGE/$NAME/"
+          ( cd "$STAGE" && zip -qr "$ZIP" "$NAME" )
+          SIZE=$(stat -c%s "$ZIP")
           [ "$SIZE" -le 8388608 ] || { echo "::error::zip ${SIZE}B > 8MB"; exit 1; }
           # The tag must still point at the commit this zip was built from (a deleted or moved tag fails here).
           read -r TYPE OBJ < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
@@ -60,5 +74,5 @@ jobs:
           if [ "$OBJ" != "$GITHUB_SHA" ]; then
             echo "::error::tag $GITHUB_REF_NAME points at $OBJ, but this zip was built from $GITHUB_SHA"; exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" "${NAME}-${VERSION}.zip" --verify-tag \
+          gh release create "$GITHUB_REF_NAME" "$ZIP" --verify-tag \
             --title "$GITHUB_REF_NAME" --notes "Release $GITHUB_REF_NAME"

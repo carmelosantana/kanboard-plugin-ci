@@ -13,8 +13,9 @@ released the same way, and local runs use the same scripts as CI.
 | `templates/workflows/` | The two short files a plugin repo carries: `test.yml` for PRs and pushes to `main`, and `release.yml` for tags (test, then release). |
 | `scripts/sync-workflows.sh` | Writes those templates into plugin checkouts, pinned to a commit of this repo on `origin/main`. |
 | `scripts/package.sh` | Builds a release zip locally, the same shape the release workflow publishes. |
+| `scripts/plugin-meta.sh` | Reads `name` and `version` from `plugin.json` and refuses values that are unsafe in a path. The release workflow and `package.sh` both use it. |
 | `testing/run-plugin-tests.sh` | Runs one plugin's PHPUnit suite, or every plugin's with `--all`, against a Kanboard source checkout on in-memory SQLite. |
-| `testing/run-realdb-tests.sh` | Runs one plugin's suite against a throwaway MariaDB or Postgres. Everything runs in containers on an internal network, with the sources mounted read-only. |
+| `testing/run-realdb-tests.sh` | Runs one plugin's suite against a throwaway MariaDB or Postgres. Everything runs in containers on an internal network, with the sources mounted read-only and the test container capped in CPU, memory, processes and time. |
 | `testing/access-map-guard.ts` | Fails when two plugins, or a plugin and core, share a controller short name. Kanboard's AccessMap keys rules by that name alone. |
 | `testing/ci-requires.php`, `testing/ci-phpunit.sh` | Helpers for `plugin-test.yml`. |
 
@@ -73,6 +74,7 @@ node --test testing/access-map-guard.test.ts    # Node 22.18+
 testing/ci-requires.test.sh
 scripts/package.test.sh
 scripts/sync-workflows.test.sh
+scripts/plugin-meta.test.sh
 ```
 
 ## License

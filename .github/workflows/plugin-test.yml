@@ -84,7 +84,7 @@ jobs:
           php harness/testing/ci-requires.php "plugins/$NAME/plugin.json" > requires.txt
           while read -r dep repo tag; do
             echo "dependency: $dep $tag"
-            git clone --quiet --depth 1 --branch "$tag" "$repo" "plugins/$dep"
+            git clone --quiet --depth 1 --branch "$tag" -- "$repo" "plugins/$dep"
           done < requires.txt
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 

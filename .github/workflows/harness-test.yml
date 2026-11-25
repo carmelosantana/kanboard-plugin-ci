@@ -1,5 +1,5 @@
 # Tests this repo's own scripts: the plugin test runner (against fixture plugins and a
-# real Kanboard checkout), the access-map guard, ci-requires, package.sh and sync-workflows.sh.
+# real Kanboard checkout), the access-map guard, ci-requires, package.sh, plugin-meta.sh and sync-workflows.sh.
 name: harness-test
 
 on:
@@ -62,3 +62,6 @@ jobs:
 
       - name: sync-workflows.test.sh
         run: scripts/sync-workflows.test.sh
+
+      - name: plugin-meta.test.sh
+        run: scripts/plugin-meta.test.sh

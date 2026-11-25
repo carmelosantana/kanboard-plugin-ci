@@ -34,4 +34,13 @@ fi
 echo "$ERR" | grep -q 'symlink' || { echo "FAIL: the error should name the symlink: $ERR"; exit 1; }
 [ ! -e "$TMP/out/LinkPlugin-1.0.0.zip" ] || { echo "FAIL: no zip may be written"; exit 1; }
 
+# The name and version come from plugin.json and become paths: unsafe values stop the build before anything is written.
+mkdir -p "$TMP/src/Evil"
+echo '{ "name": "../../escape", "version": "1.0.0" }' > "$TMP/src/Evil/plugin.json"
+if ERR="$("$HERE/package.sh" "$TMP/src/Evil" "$TMP/out2" 2>&1)"; then
+  echo "FAIL: a path-like plugin name must stop the build"; exit 1
+fi
+echo "$ERR" | grep -q 'name' || { echo "FAIL: the error should name the field: $ERR"; exit 1; }
+[ ! -e "$TMP/out2" ] || { echo "FAIL: nothing may be written for a refused plugin"; exit 1; }
+
 echo "package.test.sh PASS"

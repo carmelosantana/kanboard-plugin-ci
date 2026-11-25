@@ -17,6 +17,8 @@
 # container checks before the suite runs. Exit code: the suite's (97: preflight).
 #
 # Env: KB_IMAGE (default: built here from testing/Dockerfile.sodium, whose base is pinned by digest).
+#      REALDB_TIMEOUT (default 1800): seconds before the test container is killed. The container is also capped at
+#      2 CPUs, 2 GB of memory (no extra swap) and 1024 processes, so a hostile or runaway suite cannot take the host down.
 #      REALDB_SUBNET (default 10.213.77.0/24): the test network's private subnet, given explicitly so the run works
 #      when Docker's default address pools are exhausted. If it is taken, a few random 10.213.N.0/24 subnets are
 #      tried, then Docker's own pool. No other network is touched.
@@ -52,10 +54,11 @@ fi
 id="realdb-$$-$RANDOM"
 net="$id-net"
 db="$id-db"
+php_ctr="$id-php"
 password="$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
 scratch="$(mktemp -d)"
 cleanup() {
-  docker rm -f -v "$db" >/dev/null 2>&1 || true
+  docker rm -f -v "$php_ctr" "$db" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$scratch"
 }
@@ -137,7 +140,10 @@ for f in plugin-bootstrap.php .phpunit.result.cache; do
   : > "${scratch}/$f"
 done
 
-docker run --rm --network "$net" --user "$(id -u):$(id -g)" --entrypoint bash \
+# Named, so cleanup removes it even when the client is killed (timeout, Ctrl-C) before --rm runs.
+timeout --foreground --kill-after=30 "${REALDB_TIMEOUT:-1800}" \
+docker run --rm --name "$php_ctr" --network "$net" --user "$(id -u):$(id -g)" --entrypoint bash \
+  --cpus 2 --memory 2g --memory-swap 2g --pids-limit 1024 \
   -v "${HARNESS_ROOT}/testing/run-plugin-tests.sh:${HARNESS_ROOT}/testing/run-plugin-tests.sh:ro" \
   -v "${kb_src}:${kb_src}:ro" \
   -v "${scratch}/plugin-bootstrap.php:${kb_src}/tests/plugin-bootstrap.php:rw" \

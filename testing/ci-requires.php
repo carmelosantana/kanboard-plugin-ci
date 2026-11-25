@@ -12,6 +12,10 @@
  * AI features stub AiConnector's ProviderRegistry). Exits 1 when a required plugin is not in the
  * feed or its listed release is older than `min_version`; the same problem with a recommended
  * plugin only prints a warning and skips it.
+ *
+ * Every printed field reaches `git clone` and a path under plugins/, so each is checked first: the name is a plugin
+ * name, the repository a https://github.com/<owner>/<repo> URL, the tag vX.Y.Z[-pre]. An entry that fails is
+ * treated like an unlisted one.
  */
 
 declare(strict_types=1);
@@ -43,6 +47,10 @@ foreach ($feed['plugins'] ?? $feed as $entry) {
     $listed[$entry['name']] = $entry;
 }
 
+const NAME_RE = '/^[A-Za-z][A-Za-z0-9_]*$/';
+const REPO_RE = '#^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$#';
+const TAG_RE = '/^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/';
+
 $status = 0;
 // fail(): a required plugin fails the run; a recommended one is a warning and is skipped.
 $fail = static function (array $dep, string $message) use (&$status): void {
@@ -52,14 +60,23 @@ $fail = static function (array $dep, string $message) use (&$status): void {
     }
 };
 foreach ($deps as $dep) {
-    $name = $dep['plugin'];
+    $name = (string) $dep['plugin'];
+    if (!preg_match(NAME_RE, $name)) {
+        $fail($dep, 'unsafe plugin name ' . json_encode($name));
+        continue;
+    }
     $entry = $listed[$name] ?? null;
     if ($entry === null) {
         $fail($dep, "{$name}: not listed in the directory feed");
         continue;
     }
-    if (!preg_match('#/releases/download/(v[^/]+)/#', $entry['download'], $m)) {
-        $fail($dep, "{$name}: no release tag in download URL {$entry['download']}");
+    $repo = (string) ($entry['homepage'] ?? '');
+    if (!preg_match(REPO_RE, $repo) || str_contains($repo, '..')) {
+        $fail($dep, "{$name}: homepage is not a https://github.com/<owner>/<repo> URL");
+        continue;
+    }
+    if (!preg_match('#/releases/download/([^/]+)/#', (string) ($entry['download'] ?? ''), $m) || !preg_match(TAG_RE, $m[1])) {
+        $fail($dep, "{$name}: no vX.Y.Z release tag in its download URL");
         continue;
     }
     $tag = $m[1];
@@ -68,6 +85,6 @@ foreach ($deps as $dep) {
         $fail($dep, "{$name}: listed release {$tag} is older than min_version {$min}");
         continue;
     }
-    echo $name, ' ', rtrim($entry['homepage'], '/'), '.git ', $tag, "\n";
+    echo $name, ' ', rtrim($repo, '/'), '.git ', $tag, "\n";
 }
 exit($status);

@@ -32,4 +32,23 @@ check "an unlisted requires fails" "$rc" "1"
 echo '{ "requires": [ { "plugin": "Req" } ], "recommends": [ { "plugin": "Req" } ] }' > "$T/c.json"
 check "no duplicate checkout" "$(php "$HERE/ci-requires.php" "$T/c.json" "$T/feed.json" 2>/dev/null | wc -l | tr -d ' ')" "1"
 
+# Names, repositories and tags reach `git clone` and a path under plugins/: anything unsafe is refused, never printed.
+cat > "$T/evil-feed.json" <<'JSON'
+[
+  { "name": "../Escape", "homepage": "https://github.com/acme/escape", "download": "https://github.com/acme/escape/releases/download/v1.0.0/E.zip" },
+  { "name": "Opt", "homepage": "--upload-pack=touch /tmp/x", "download": "https://github.com/acme/opt/releases/download/v1.0.0/O.zip" },
+  { "name": "Host", "homepage": "https://evil.example/acme/host", "download": "https://github.com/acme/host/releases/download/v1.0.0/H.zip" },
+  { "name": "Tag", "homepage": "https://github.com/acme/tag", "download": "https://github.com/acme/tag/releases/download/v1.0.0 --x/T.zip" },
+  { "name": "Ok", "homepage": "https://github.com/acme/ok", "download": "https://github.com/acme/ok/releases/download/v1.0.0/Ok.zip" }
+]
+JSON
+for dep in ../Escape Opt Host Tag; do
+  echo "{ \"requires\": [ { \"plugin\": \"$dep\" } ] }" > "$T/e.json"
+  out="$(php "$HERE/ci-requires.php" "$T/e.json" "$T/evil-feed.json" 2>"$T/err")"; rc=$?
+  check "$dep: refused" "$rc" "1"
+  check "$dep: nothing printed" "$out" ""
+done
+echo '{ "recommends": [ { "plugin": "Opt" } ], "requires": [ { "plugin": "Ok" } ] }' > "$T/f.json"
+check "an unsafe recommends is skipped, the rest printed" "$(php "$HERE/ci-requires.php" "$T/f.json" "$T/evil-feed.json" 2>/dev/null)" "Ok https://github.com/acme/ok.git v1.0.0"
+
 [[ $fails -eq 0 ]] && echo "ci-requires.test.sh PASS" || { echo "ci-requires.test.sh: $fails failed"; exit 1; }
