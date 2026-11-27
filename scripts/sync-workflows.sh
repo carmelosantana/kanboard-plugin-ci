@@ -31,6 +31,10 @@ DATE="$(git -C "$ROOT" show -s --format=%cs "$SHA")"
 for dir in "$@"; do
   dir="${dir%/}"
   [[ -f "$dir/plugin.json" ]] || { echo "skip $dir: no plugin.json" >&2; continue; }
+  # Writes would follow a symlink out of the plugin checkout: refuse one anywhere on the path.
+  for p in .github .github/workflows .github/workflows/test.yml .github/workflows/release.yml; do
+    [[ ! -L "$dir/$p" ]] || { echo "ERROR: $dir/$p is a symlink; refusing to write through it." >&2; exit 1; }
+  done
   mkdir -p "$dir/.github/workflows"
   for wf in test.yml release.yml; do
     sed -e "s/HARNESS_SHA/${SHA}/" -e "s/HARNESS_DATE/harness ${DATE}/" -e "s/SHIP_DOCS/${SHIP_DOCS}/" \

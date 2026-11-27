@@ -2,7 +2,7 @@
 // Run: node --test testing/access-map-guard.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findClashes, loadWaivers, scan, WAIVERS, type Waiver } from './access-map-guard.ts';
@@ -111,6 +111,25 @@ test('directories without plugin.json are not plugins', () => {
   const { root, kb } = tree({ A: { controllers: { FooController: cls('FooController') } } });
   mkdirSync(join(root, 'docs', 'Controller'), { recursive: true });
   writeFileSync(join(root, 'docs', 'Controller', 'FooController.php'), cls('FooController'));
+  assert.deepEqual(findClashes(scan(root, kb), []), []);
+});
+
+test('symlinked controller and Plugin.php files are not followed', () => {
+  const { root, kb } = tree({ A: { controllers: { FooController: cls('FooController') } }, B: {} });
+  const outside = join(mkdtempSync(join(tmpdir(), 'amg-outside-')), 'Foo.php');
+  writeFileSync(outside, cls('FooController') + "\n$this->applicationAccessMap->add('FooController', '*', Role::APP_USER);");
+  symlinkSync(outside, join(root, 'B', 'Controller', 'FooController.php'));
+  assert.deepEqual(findClashes(scan(root, kb), []), [], 'a linked controller must not count');
+  const { root: r2, kb: kb2 } = tree({ A: { controllers: { FooController: cls('FooController') } } });
+  mkdirSync(join(r2, 'C', 'Controller'), { recursive: true });
+  writeFileSync(join(r2, 'C', 'plugin.json'), '{}');
+  symlinkSync(outside, join(r2, 'C', 'Plugin.php'));
+  assert.deepEqual(findClashes(scan(r2, kb2), []), [], 'a linked Plugin.php must not be read');
+});
+
+test('oversized sources are skipped, not read', () => {
+  const { root, kb } = tree({ A: { controllers: { FooController: cls('FooController') } }, B: {} });
+  writeFileSync(join(root, 'B', 'Controller', 'FooController.php'), cls('FooController') + ' '.repeat(2 * 1024 * 1024));
   assert.deepEqual(findClashes(scan(root, kb), []), []);
 });
 

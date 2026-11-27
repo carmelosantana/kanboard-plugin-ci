@@ -56,4 +56,17 @@ else
   fail "--ship-docs, default sha is origin/main (rc=$rc)" "$out"
 fi
 
+# 4. A symlinked .github, .github/workflows or workflow file is refused, and nothing is written through it.
+for link in .github .github/workflows .github/workflows/test.yml; do
+  P="$(plugin "p4-${link//\//-}")"; OUT="$TMP/outside-${link//\//-}"; mkdir -p "$OUT"
+  mkdir -p "$P/$(dirname "$link")"
+  if [[ "$link" == *.yml ]]; then : > "$OUT/test.yml"; ln -s "$OUT/test.yml" "$P/$link"; else ln -s "$OUT" "$P/$link"; fi
+  out="$("$H/scripts/sync-workflows.sh" "$P" 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]] && grep -q 'symlink' <<<"$out" && [[ -z "$(find "$OUT" -type f -size +0)" && ! -e "$OUT/release.yml" && ! -e "$OUT/workflows" ]]; then
+    pass "refuses a symlinked $link (rc=$rc)"
+  else
+    fail "refuses a symlinked $link (rc=$rc)" "$out"
+  fi
+done
+
 [[ $fails -eq 0 ]] && echo "sync-workflows.test.sh PASS" || { echo "sync-workflows.test.sh: $fails failed"; exit 1; }

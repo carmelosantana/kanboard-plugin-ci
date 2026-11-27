@@ -13,8 +13,10 @@
 # and are removed afterwards. Only testing/run-plugin-tests.sh, the Kanboard source (KB_SRC) and the plugin are mounted, all
 # read-only (so is kanboard-src/.git: nothing in the container can plant a hook that later runs on the host). The
 # paths a run regenerates, kanboard-src/tests/plugin-bootstrap.php and PHPUnit's tests/.phpunit.result.cache, are
-# throwaway host files mounted over them. No .env file of the host reaches the container, which a preflight in the
-# container checks before the suite runs. Exit code: the suite's (97: preflight).
+# throwaway host files mounted over them. The .git metadata of Kanboard and the plugin is hidden behind empty read-only
+# mounts. A preflight in the container checks, before the suite runs, that no .env file is visible, that there is no
+# default route, no external DNS and no git metadata, and that kanboard-src can't be written. It checks those
+# properties only; keep other credentials out of the plugin and Kanboard trees. Exit code: the suite's (97: preflight).
 #
 # Env: KB_IMAGE (default: built here from testing/Dockerfile.sodium, whose base is pinned by digest).
 #      REALDB_TIMEOUT (default 1800): seconds before the test container is killed. The container is also capped at
@@ -122,15 +124,18 @@ FROM $KB_IMAGE
 RUN apk add --no-cache php84-tokenizer && printf 'opcache.save_comments=1\\nmemory_limit=-1\\n' > /etc/php84/conf.d/zz-realdb-tests.ini
 DOCKERFILE
 
-# Preflight, inside the PHP container before the suite: no host secret is visible (no file named .env, .env.<x> or
+# Preflight, inside the PHP container before the suite: no .env file is visible (no file named .env, .env.<x> or
 # <x>.env under any mounted root: plugins, harness, Kanboard source; only names are listed, nothing is read, and a scan
-# error fails), there is no default route (the network is --internal and its gateway isolated: the suite reaches the
-# database and nothing else), and kanboard-src and its .git can't be written. Exit 97 on a breach, before any test runs.
+# error fails), there is no default route and external names don't resolve (the network is --internal and its gateway
+# isolated: the suite reaches the database and nothing else), and kanboard-src and its .git can't be written.
+# Exit 97 on a breach, before any test runs.
 preflight='leak="$(find "$PLUGINS_ROOT" "$HARNESS_ROOT" "$KB_SRC" \( -name .env -o -name ".env.*" -o -name "*.env" \) -print -quit)" || { echo "preflight: the .env scan failed" >&2; exit 97; }
 if test -n "$leak"; then echo "preflight: ${leak#"$PLUGINS_ROOT"/} (a .env file) is visible in the container" >&2; exit 97; fi
 if awk '"'"'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }'"'"' /proc/net/route; then echo "preflight: the container has a default route (egress)" >&2; exit 97; fi
+if test -e "$KB_SRC/.git/config" || test -e "$PLUGINS_ROOT/$1/.git/config"; then echo "preflight: git metadata is visible in the container" >&2; exit 97; fi
+if getent hosts example.com >/dev/null 2>&1; then echo "preflight: external DNS resolves (egress)" >&2; exit 97; fi
 for d in "$KB_SRC" "$KB_SRC/.git"; do if touch "$d/.realdb-write-probe" 2>/dev/null; then rm -f "$d/.realdb-write-probe"; echo "preflight: $d is writable" >&2; exit 97; fi; done
-echo "preflight: no .env files, no default route, kanboard-src and its .git read-only"'
+echo "preflight: no .env files, no default route, no external DNS, no git metadata, kanboard-src and its .git read-only"'
 
 # The read-only tree needs, on the host, the plugin's symlink and the mount points of the regenerated files.
 kb_src="$KB_SRC"
@@ -138,6 +143,13 @@ kb_src="$KB_SRC"
 for f in plugin-bootstrap.php .phpunit.result.cache; do
   [[ -e "${kb_src}/tests/$f" ]] || : > "${kb_src}/tests/$f"
   : > "${scratch}/$f"
+done
+
+# Hide git metadata (remotes, logs, config) from the tests: an empty read-only tmpfs over a .git directory, /dev/null
+# over a worktree's .git file.
+hide=()
+for g in "${kb_src}/.git" "${PLUGINS_ROOT}/${PLUGIN}/.git"; do
+  if [[ -d "$g" && ! -L "$g" ]]; then hide+=(--mount "type=tmpfs,destination=$g,readonly"); elif [[ -f "$g" ]]; then hide+=(-v "/dev/null:$g:ro"); fi
 done
 
 # Named, so cleanup removes it even when the client is killed (timeout, Ctrl-C) before --rm runs.
@@ -148,7 +160,7 @@ docker run --rm --name "$php_ctr" --network "$net" --user "$(id -u):$(id -g)" --
   -v "${kb_src}:${kb_src}:ro" \
   -v "${scratch}/plugin-bootstrap.php:${kb_src}/tests/plugin-bootstrap.php:rw" \
   -v "${scratch}/.phpunit.result.cache:${kb_src}/tests/.phpunit.result.cache:rw" \
-  -v "${PLUGINS_ROOT}/${PLUGIN}:${PLUGINS_ROOT}/${PLUGIN}:ro" \
+  -v "${PLUGINS_ROOT}/${PLUGIN}:${PLUGINS_ROOT}/${PLUGIN}:ro" "${hide[@]}" \
   -e HOME=/tmp -e PLUGINS_ROOT="$PLUGINS_ROOT" -e KB_SRC="$KB_SRC" -e HARNESS_ROOT="$HARNESS_ROOT" "${env[@]}" \
   -w "$PLUGINS_ROOT" "$php_image" -c "$preflight"' && exec "$0" "$1"' \
   "${HARNESS_ROOT}/testing/run-plugin-tests.sh" "$PLUGIN"

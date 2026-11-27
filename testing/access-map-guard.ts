@@ -20,7 +20,7 @@
  * may name a JSON file of more waivers, same shape; a malformed file exits 2.
  * Exits 1 and lists each clash when any is unwaived.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -94,6 +94,16 @@ const RULE_RE = /(?:application|project)AccessMap->add\(\s*['"]([^'"]+)['"]/g;
 
 const lower = (s: string) => s.toLowerCase();
 const phpFiles = (dir: string) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.php')) : []);
+// Plugin checkouts are untrusted: read only regular files (never through a symlink, never a device) up to 1 MiB.
+const MAX_SOURCE = 1024 * 1024;
+const source = (path: string): string => {
+  try {
+    const st = lstatSync(path);
+    return st.isFile() && st.size <= MAX_SOURCE ? readFileSync(path, 'utf8') : '';
+  } catch {
+    return '';
+  }
+};
 
 export function scan(pluginsRoot: string, kbSrc: string): Scan {
   const controllers = new Map<string, Set<string>>();
@@ -103,11 +113,11 @@ export function scan(pluginsRoot: string, kbSrc: string): Scan {
     if (!existsSync(join(dir, 'plugin.json'))) continue;
     const own = new Set<string>();
     for (const f of phpFiles(join(dir, 'Controller'))) {
-      const m = CLASS_RE.exec(readFileSync(join(dir, 'Controller', f), 'utf8'));
+      const m = CLASS_RE.exec(source(join(dir, 'Controller', f)));
       if (m) own.add(lower(m[1]));
     }
     controllers.set(name, own);
-    const php = existsSync(join(dir, 'Plugin.php')) ? readFileSync(join(dir, 'Plugin.php'), 'utf8') : '';
+    const php = source(join(dir, 'Plugin.php'));
     rules.set(name, new Set([...php.matchAll(RULE_RE)].map((m) => lower(m[1]))));
   }
   const core = new Set(phpFiles(join(kbSrc, 'app', 'Controller')).map((f) => lower(basename(f, '.php'))));
