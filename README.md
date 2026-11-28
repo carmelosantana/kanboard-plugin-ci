@@ -4,6 +4,9 @@ Shared CI and test runners for a suite of [Kanboard](https://kanboard.org) plugi
 lives in its own repository and calls the reusable workflows here, so every plugin is tested and
 released the same way, and local runs use the same scripts as CI.
 
+For a walkthrough with diagrams of the test job, the release checks and the real-database
+isolation, see [How kanboard-plugin-ci works](https://projects.madeinnewburgh.com/broadside/s/E3FVItyCskUSggauk8pt63NJH3H3A8ZnsiTS83TlFJw).
+
 ## What is here
 
 | Path | What it does |
